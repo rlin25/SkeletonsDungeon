@@ -19,7 +19,9 @@ class Player:
         self.weapon      = None    # Weapon or None
         self.armour      = None    # Armour or None
         self.consumables = []      # max 3
-        self.gold = 0   # Phase 4: gold economy
+        self.gold = 0        # Phase 4: gold economy
+        self.temp_atk = 0    # Phase 4: temporary ATK bonus from room theme (not saved)
+        self.temp_def = 0    # Phase 4: temporary DEF bonus from room theme (not saved)
 
     @property
     def alive(self):

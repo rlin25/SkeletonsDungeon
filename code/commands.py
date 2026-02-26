@@ -3,7 +3,7 @@ from typing import Optional
 import sys
 import random
 
-from constants import DIRECTIONS, ABBREVS, xp_threshold
+from constants import DIRECTIONS, ABBREVS, xp_threshold, REST_FLAVOUR
 from items import HealthPotion, Scroll, Weapon, Armour
 from upgrades import draw_upgrades
 from renderer import say, hp_bar
@@ -151,24 +151,19 @@ def offer_item(player, item, source=''):
 # ── do_merchant ───────────────────────────────────────────────────────────────
 
 def do_merchant(room, player, floor_num):
-    if room.merchant_done:
-        say("The merchant's stock is exhausted.")
-        return
+    """Display merchant wares. Purchasing is handled by cmd_buy / cmd_reroll."""
     print()
     say("A hooded merchant eyes you from the shadows.")
-    say("'Choose one item — free of charge. I've no use for them here.'")
+    if not room.merchant_items:
+        say("'I have nothing left to sell.'")
+        print()
+        return
+    say(f"'Browse my wares. You have {player.gold} gold.'")
     print()
-    for i, item in enumerate(room.merchant_items, 1):
-        say(f"  {i}. {item.name} — {item.desc}")
-    n = len(room.merchant_items)
-    say(f"  {n + 1}. Take nothing")
-    choice = _pick(f"Your choice (1-{n + 1}):", 1, n + 1)
-    if choice == n + 1:
-        say("You leave the merchant's wares untouched.")
-    else:
-        item = room.merchant_items[choice - 1]
-        offer_item(player, item)
-    room.merchant_done = True
+    for i, (item, price) in enumerate(zip(room.merchant_items, room.merchant_prices), 1):
+        say(f"  {i}. {item.name} — {item.desc}  [{price} gold]")
+    reroll_note = " (used)" if room.merchant_rerolled else ""
+    say(f"  buy [1-{len(room.merchant_items)}] to purchase  |  reroll for 10 gold{reroll_note}")
     print()
 
 
@@ -183,7 +178,6 @@ def cmd_attack(tokens, player, room, floor_num, boss_room):
     msgs = [f"You strike the {enemy.name} for {dmg} damage!"]
     if not enemy.alive:
         msgs.append(f"The {enemy._name} crumples to the ground. Victory!")
-        msgs.append("You catch your breath and recover fully.")
     else:
         msgs.append(f"The {enemy.name} staggers — {enemy.hp}/{enemy.max_hp} HP.")
     return CommandResult(turn_used=True, messages=msgs)
@@ -203,7 +197,6 @@ def cmd_heavy_strike(tokens, player, room, floor_num, boss_room):
     msgs = [f"HEAVY STRIKE! You slam the {enemy.name} for {dmg} damage!"]
     if not enemy.alive:
         msgs.append(f"The {enemy._name} is obliterated. Victory!")
-        msgs.append("You catch your breath and recover fully.")
     else:
         msgs.append(f"The {enemy.name} reels — {enemy.hp}/{enemy.max_hp} HP.")
     return CommandResult(turn_used=True, messages=msgs)
@@ -221,18 +214,39 @@ def cmd_move(tokens, player, room, floor_num, boss_room):
 
 
 def cmd_look(tokens, player, room, floor_num, boss_room):
+    room.exits_revealed = True  # reveal exits in Collapsed Tunnel
     if room.type == 'boss':
         msgs = ["The chamber reeks of blood. Shadows writhe on the walls."]
     else:
         msgs = [f"{room.theme_name}: {room.theme_desc}"]
-    if room.type == 'staircase':
-        msgs.append("A stone staircase descends into the darkness below.")
-        if boss_room and boss_room.enemy and boss_room.enemy.alive:
-            msgs.append("The staircase is sealed — defeat the boss first.")
-    elif room.type == 'merchant':
-        msgs.append("A hooded merchant sits quietly in the corner.")
-    elif room.flavour:
-        msgs.append(room.flavour)
+        # Show active theme modifier info
+        if room.theme_name == 'Damp Cave':
+            msgs.append("[Damp Cave: +2 DEF while present, 3 chip damage on first entry]")
+        elif room.theme_name == 'Torchlit Corridor':
+            msgs.append("[Torchlit Corridor: +2 ATK while present]")
+        elif room.theme_name == 'Forgotten Chamber':
+            msgs.append("[Forgotten Chamber: undead variant enemies, higher item chance]")
+        elif room.theme_name == 'Collapsed Tunnel':
+            msgs.append("[Collapsed Tunnel: exits were hidden — now revealed]")
+        if room.type == 'staircase':
+            msgs.append("A stone staircase descends into the darkness below.")
+            if boss_room and boss_room.enemy and boss_room.enemy.alive:
+                msgs.append("The staircase is sealed — defeat the boss first.")
+        elif room.type == 'rest':
+            if room.rest_used:
+                msgs.append("The rest spot here is depleted.")
+            else:
+                msgs.append("This place offers rest. (type 'rest' to recover fully)")
+        elif room.type == 'merchant':
+            msgs.append("A hooded merchant sits quietly in the corner.")
+            if room.merchant_items:
+                msgs.append("Wares:")
+                for i, (item, price) in enumerate(zip(room.merchant_items, room.merchant_prices), 1):
+                    msgs.append(f"  {i}. {item.name} — {item.desc}  [{price} gold]")
+            else:
+                msgs.append("The merchant has nothing left to sell.")
+        elif room.flavour:
+            msgs.append(room.flavour)
     if room.enemy and room.enemy.alive:
         msgs.append(f"{room.enemy.name} ({room.enemy.hp}/{room.enemy.max_hp} HP) faces you.")
     if room.item:
@@ -255,6 +269,7 @@ def cmd_inventory(tokens, player, room, floor_num, boss_room):
             msgs.append(f"  [{i}] {c.name} — {c.desc}")
     else:
         msgs.append("  Consumables: empty")
+    msgs.append(f"Gold   : {player.gold}")
     msgs.append(f"Level {player.level} | XP: {player.xp}/{xp_threshold(player.level)}")
     if player.hs_unlocked:
         cd = f"{player.hs_cooldown}t cooldown" if player.hs_cooldown else "ready"
@@ -328,10 +343,10 @@ def cmd_map(tokens, player, room, floor_num, boss_room):
 
 
 def cmd_save(tokens, player, room, floor_num, boss_room):
-    can = (room.type == 'empty' or
+    can = (room.type in ('empty', 'rest') or
            (room.type == 'boss' and room.enemy and not room.enemy.alive))
     if not can:
-        return CommandResult(messages=['You can only save in empty rooms or after defeating a boss.'])
+        return CommandResult(messages=['You can only save in empty rooms, rest rooms, or after defeating a boss.'])
     return CommandResult(action='save')
 
 
@@ -340,24 +355,76 @@ def cmd_load(tokens, player, room, floor_num, boss_room):
 
 
 def cmd_rest(tokens, player, room, floor_num, boss_room):
-    # Phase 4 stub
-    return CommandResult(messages=['(rest not yet implemented)'])
+    if room.type != 'rest':
+        return CommandResult(messages=["There is no place to rest here."])
+    if room.enemy and room.enemy.alive:
+        return CommandResult(messages=[f"You can't rest with {room.enemy.name} threatening you!"])
+    if room.rest_used:
+        return CommandResult(messages=["This rest spot is depleted. There is nothing more to gain here."])
+    room.rest_used = True
+    player.full_heal()
+    flavour = REST_FLAVOUR.get(room.theme_name, "You rest and recover fully.")
+    return CommandResult(messages=[flavour, f"HP fully restored! ({player.hp}/{player.max_hp})"])
 
 
 def cmd_buy(tokens, player, room, floor_num, boss_room):
-    # Phase 4 stub
-    return CommandResult(messages=['(buy not yet implemented)'])
+    if room.type != 'merchant':
+        return CommandResult(messages=["There is no merchant here."])
+    if not room.merchant_items:
+        return CommandResult(messages=["The merchant has nothing left to sell."])
+    if len(tokens) < 2 or not tokens[1].isdigit():
+        return CommandResult(messages=["Buy what? (e.g. buy 1, buy 2)"])
+    idx = int(tokens[1]) - 1
+    if idx < 0 or idx >= len(room.merchant_items):
+        return CommandResult(messages=[f"No item {tokens[1]}. There are {len(room.merchant_items)} item(s)."])
+    price = room.merchant_prices[idx]
+    item  = room.merchant_items[idx]
+    if player.gold < price:
+        return CommandResult(messages=[
+            f"You can't afford {item.name} ({price} gold). You have {player.gold} gold."
+        ])
+    player.gold -= price
+    room.merchant_items.pop(idx)
+    room.merchant_prices.pop(idx)
+    msgs = [f"You spend {price} gold. Gold remaining: {player.gold}."]
+    offer_item(player, item)
+    if room.merchant_items:
+        msgs.append("Remaining wares:")
+        for i, (it, pr) in enumerate(zip(room.merchant_items, room.merchant_prices), 1):
+            msgs.append(f"  {i}. {it.name} — {it.desc}  [{pr} gold]")
+    else:
+        msgs.append("The merchant's stock is exhausted.")
+    return CommandResult(messages=msgs)
 
 
 def cmd_reroll(tokens, player, room, floor_num, boss_room):
-    # Phase 4 stub
-    return CommandResult(messages=['(reroll not yet implemented)'])
+    if room.type != 'merchant':
+        return CommandResult(messages=["There is no merchant here."])
+    if room.merchant_rerolled:
+        return CommandResult(messages=["You have already rerolled this merchant's stock."])
+    REROLL_COST = 10
+    if player.gold < REROLL_COST:
+        return CommandResult(messages=[
+            f"Rerolling costs {REROLL_COST} gold. You have {player.gold} gold."
+        ])
+    player.gold -= REROLL_COST
+    room.merchant_rerolled = True
+    from floor import generate_merchant_stock
+    items, prices = generate_merchant_stock(floor_num)
+    room.merchant_items  = items
+    room.merchant_prices = prices
+    msgs = [f"The merchant reshuffles their wares. ({REROLL_COST} gold spent)  Gold: {player.gold}"]
+    msgs.append("New stock:")
+    for i, (item, price) in enumerate(zip(room.merchant_items, room.merchant_prices), 1):
+        msgs.append(f"  {i}. {item.name} — {item.desc}  [{price} gold]")
+    return CommandResult(messages=msgs)
 
 
 def cmd_help(tokens, player, room, floor_num, boss_room):
     say("Commands: attack (a) | heavy strike (hs) | move <dir> (mn/ms/me/mw)")
     say("          look (l) | health (h) | inventory (i) | use <item> (u)")
     say("          equip | descend (d) | map (m) | save (sv) | load (ld) | quit")
+    say("          rest (r) | buy [n] (b [n]) | reroll (rr)")
     return CommandResult()
 
 

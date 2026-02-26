@@ -14,13 +14,37 @@ from items import random_item
 
 
 def on_room_enter(player, room):
-    """Called whenever the player enters a room. Apply entry effects here in Phase 4."""
-    pass
+    """Apply entry effects for the room's theme."""
+    if room.theme_name == 'Torchlit Corridor':
+        player.atk_bonus += 2
+        player.temp_atk   = 2
+        say("[Torchlit Corridor: +2 ATK while in this room]")
+    elif room.theme_name == 'Damp Cave':
+        player.defense += 2
+        player.temp_def  = 2
+        say("[Damp Cave: +2 DEF while in this room]")
+        if not room.chip_dealt:
+            room.chip_dealt = True
+            actual = player.take_damage(3)
+            if actual > 0:
+                say(f"The slippery stone underfoot trips you — {actual} chip damage!")
+            else:
+                say("The slippery stone underfoot is treacherous, but your armour absorbs it.")
+
+    # Auto-collect room gold
+    if room.gold > 0:
+        gold = room.gold
+        player.gold += gold
+        room.gold = 0
+        say(f"You find {gold} gold coins.")
 
 
 def on_room_exit(player, room):
-    """Called whenever the player leaves a room. Remove temporary effects here in Phase 4."""
-    pass
+    """Remove temporary theme effects when leaving a room."""
+    player.atk_bonus -= player.temp_atk
+    player.defense   -= player.temp_def
+    player.temp_atk   = 0
+    player.temp_def   = 0
 
 
 def run_game():
@@ -36,7 +60,7 @@ def run_game():
     on_room_enter(player, current_room)
     print()
     rule()
-    draw_room(player, current_room, floor_num)
+    draw_room(player, current_room, floor_num, rooms)
     rule()
 
     while True:
@@ -73,18 +97,25 @@ def run_game():
         if result.turn_used:
             player.tick()
 
-        # Enemy killed this turn
+        # Enemy killed this turn — award XP and gold, maybe drop item
         xp_gained    = 0
         dropped_item = None
         if enemy_was_alive and current_room.enemy and not current_room.enemy.alive:
-            player.full_heal()
-            xp_gained = current_room.enemy.xp_value(floor_num)
+            gold_scale = 1 + (floor_num - 1) * 0.1
+            xp_gained  = current_room.enemy.xp_value(floor_num)
             if isinstance(current_room.enemy, Boss):
+                gold_drop = round(random.randint(15, 30) * gold_scale)
+                player.gold += gold_drop
+                result.messages.append(f"The boss drops {gold_drop} gold!")
                 dropped_item = random_item(floor_num)
                 result.messages.append(f"The boss drops: {dropped_item.name}!")
-            elif random.random() < 0.2:
-                dropped_item = random_item(floor_num)
-                result.messages.append(f"The {current_room.enemy._name} drops: {dropped_item.name}.")
+            else:
+                gold_drop = round(random.randint(1, 5) * gold_scale)
+                player.gold += gold_drop
+                result.messages.append(f"You find {gold_drop} gold.")
+                if random.random() < 0.2:
+                    dropped_item = random_item(floor_num)
+                    result.messages.append(f"The {current_room.enemy._name} drops: {dropped_item.name}.")
 
         print()
 
@@ -151,7 +182,7 @@ def run_game():
         # Redraw
         print()
         rule()
-        draw_room(player, current_room, floor_num)
+        draw_room(player, current_room, floor_num, rooms)
 
         if not player.alive:
             rule()

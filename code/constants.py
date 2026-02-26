@@ -72,6 +72,13 @@ ABBREVS = {
 
 RULE = '─' * 44
 
+REST_FLAVOUR = {
+    'Damp Cave':         "A shallow alcove fed by a natural spring. The water is ice-cold and clear. You drink deeply.",
+    'Torchlit Corridor': "A stone bench beside a steady torch. You sit, breathe, and let the warmth settle into your bones.",
+    'Forgotten Chamber': "A cracked altar still faintly warm, as if someone prayed here not long ago. You rest against it and feel restored.",
+    'Collapsed Tunnel':  "A gap in the rubble just wide enough to shelter in. Dust settles around you. For a moment, you feel safe.",
+}
+
 
 def xp_threshold(level: int) -> int:
     return level * 100

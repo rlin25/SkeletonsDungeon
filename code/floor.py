@@ -1,9 +1,34 @@
 import random
 
 from constants import THEMES, DIR_DELTA, OPPOSITES
-from items import random_item
+from items import random_item, HealthPotion, Weapon, Armour, Scroll
 from enemy import Boss
 from room import Room
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _undead_name(floor_num):
+    if floor_num <= 2:   return 'Skeleton'
+    elif floor_num <= 4: return 'Shadow Wraith'
+    else:                return 'Undead Knight'
+
+
+def _merchant_price(item):
+    if isinstance(item, HealthPotion):
+        return random.randint(8, 15)
+    elif isinstance(item, (Weapon, Armour)):
+        return random.randint(20, 40)
+    elif isinstance(item, Scroll):
+        return random.randint(12, 25)
+    return 10
+
+
+def generate_merchant_stock(floor_num):
+    """Generate 3 merchant items with randomised prices."""
+    items  = [random_item(floor_num) for _ in range(3)]
+    prices = [_merchant_price(item) for item in items]
+    return items, prices
 
 
 # ── Floor Generator ───────────────────────────────────────────────────────────
@@ -40,7 +65,7 @@ def generate_floor(floor_num):
                 positions.append(npos)
                 break
 
-    # Assign types
+    # Assign types — distribution: merchant 5%, rest 15%, enemy 55%, empty 25%
     non_start = positions[1:]
     stair_pos = random.choice(non_start)
     boss_pos  = None
@@ -57,24 +82,41 @@ def generate_floor(floor_num):
             roll = random.random()
             if roll < 0.05:
                 type_map[pos] = 'merchant'
-            elif roll < 0.65:
+            elif roll < 0.20:
+                type_map[pos] = 'rest'
+            elif roll < 0.75:
                 type_map[pos] = 'enemy'
             else:
                 type_map[pos] = 'empty'
 
     # Build Room objects
+    gold_scale = 1 + (floor_num - 1) * 0.1
     rooms_by_pos = {}
     for col, row in positions:
         theme_name, theme_desc = random.choice(THEMES)
         rtype = type_map[(col, row)]
         room  = Room(col, row, rtype, theme_name, theme_desc, floor_num)
+
         if rtype == 'boss':
             room.enemy = Boss(floor_num, boss_num)
+
         if rtype == 'merchant':
-            room.merchant_items = [random_item(floor_num)
-                                   for _ in range(random.randint(2, 3))]
-        if rtype == 'empty' and random.random() < 0.3:
-            room.item = random_item(floor_num)
+            items, prices = generate_merchant_stock(floor_num)
+            room.merchant_items  = items
+            room.merchant_prices = prices
+
+        if rtype == 'enemy' and theme_name == 'Forgotten Chamber' and random.random() < 0.30:
+            room.enemy._name = _undead_name(floor_num)
+
+        if rtype == 'empty':
+            # Forgotten Chamber boosts item spawn chance to 40%
+            item_chance = 0.40 if theme_name == 'Forgotten Chamber' else 0.30
+            if random.random() < item_chance:
+                room.item = random_item(floor_num)
+            # 25% chance for floor gold
+            if random.random() < 0.25:
+                room.gold = round(random.randint(3, 8) * gold_scale)
+
         rooms_by_pos[(col, row)] = room
 
     # BFS spanning tree
