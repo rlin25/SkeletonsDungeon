@@ -11,6 +11,7 @@ from enemy import enemy_from_dict
 def save_game(player, rooms, current_room, floor_num, boss_room):
     data = {
         'floor_num': floor_num,
+        'ng_plus_cycle': player.ng_plus_cycle,
         'current_room': [current_room.col, current_room.row],
         'boss_room': [boss_room.col, boss_room.row] if boss_room else None,
         'player': player.to_dict(),

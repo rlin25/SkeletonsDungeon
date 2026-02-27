@@ -1,8 +1,8 @@
 import random
 
-from constants import THEMES, DIR_DELTA, OPPOSITES
+from constants import THEMES, DIR_DELTA, OPPOSITES, FINAL_BOSS_FLOOR
 from items import random_item, HealthPotion, Weapon, Armour, Scroll
-from enemy import Boss
+from enemy import Boss, EliteEnemy, FinalBoss, Enemy
 from room import Room
 
 
@@ -33,6 +33,9 @@ def generate_merchant_stock(floor_num):
 
 # ── Floor Generator ───────────────────────────────────────────────────────────
 
+TRAP_TYPES = ['spike_pit', 'poison_vent', 'alarm', 'binding_snare', 'collapse']
+
+
 def _floor_room_count(floor_num):
     if floor_num == 1:   base = 6
     elif floor_num == 2: base = 8
@@ -41,13 +44,14 @@ def _floor_room_count(floor_num):
     return max(4, base + random.randint(-2, 2))
 
 
-def generate_floor(floor_num):
+def generate_floor(floor_num, ng_plus_cycle=0):
     """
     Generate a connected floor.
     Returns (rooms_list, start_room, boss_room).
-    boss_room is None on non-boss floors.
+    boss_room is None on non-boss floors and on floor 15 (final boss floor).
+    On floor 15, the final boss room has type == 'final_boss'.
     """
-    is_boss_floor = (floor_num % 3 == 0)
+    is_boss_floor = (floor_num % 3 == 0) and (floor_num != FINAL_BOSS_FLOOR)
     boss_num      = floor_num // 3
     count         = _floor_room_count(floor_num)
 
@@ -65,7 +69,7 @@ def generate_floor(floor_num):
                 positions.append(npos)
                 break
 
-    # Assign types — distribution: merchant 5%, rest 15%, enemy 55%, empty 25%
+    # Assign types
     non_start = positions[1:]
     stair_pos = random.choice(non_start)
     boss_pos  = None
@@ -74,17 +78,26 @@ def generate_floor(floor_num):
         if candidates:
             boss_pos = random.choice(candidates)
 
-    type_map = {(0, 0): 'empty', stair_pos: 'staircase'}
+    # Staircase on normal floors; final_boss room on floor 15
+    if floor_num == FINAL_BOSS_FLOOR:
+        type_map = {(0, 0): 'empty', stair_pos: 'final_boss'}
+    else:
+        type_map = {(0, 0): 'empty', stair_pos: 'staircase'}
+
     if boss_pos:
         type_map[boss_pos] = 'boss'
+
+    # Distribution: merchant 5%, rest 12%, trap 10%, enemy 50%, empty 23%
     for pos in non_start:
         if pos not in type_map:
             roll = random.random()
             if roll < 0.05:
                 type_map[pos] = 'merchant'
-            elif roll < 0.20:
+            elif roll < 0.17:
                 type_map[pos] = 'rest'
-            elif roll < 0.75:
+            elif roll < 0.27:
+                type_map[pos] = 'trap'
+            elif roll < 0.77:
                 type_map[pos] = 'enemy'
             else:
                 type_map[pos] = 'empty'
@@ -98,15 +111,51 @@ def generate_floor(floor_num):
         room  = Room(col, row, rtype, theme_name, theme_desc, floor_num)
 
         if rtype == 'boss':
-            room.enemy = Boss(floor_num, boss_num)
+            room.enemies = [Boss(floor_num, boss_num, ng_plus_cycle)]
+
+        if rtype == 'final_boss':
+            room.enemies = [FinalBoss(ng_plus_cycle)]
+
+        if rtype == 'trap':
+            room.trap_type = random.choice(TRAP_TYPES)
 
         if rtype == 'merchant':
             items, prices = generate_merchant_stock(floor_num)
             room.merchant_items  = items
             room.merchant_prices = prices
 
-        if rtype == 'enemy' and theme_name == 'Forgotten Chamber' and random.random() < 0.30:
-            room.enemy._name = _undead_name(floor_num)
+        if rtype == 'enemy':
+            # Multi-enemy spawning based on floor depth
+            count_enemies = 1
+            if floor_num >= 12:
+                if random.random() < 0.50:
+                    count_enemies = 2
+                if count_enemies == 2 and random.random() < 0.20:
+                    count_enemies = 3
+            elif floor_num >= 8:
+                if random.random() < 0.40:
+                    count_enemies = 2
+                if count_enemies == 2 and random.random() < 0.10:
+                    count_enemies = 3
+            elif floor_num >= 4:
+                if random.random() < 0.25:
+                    count_enemies = 2
+            # else: count_enemies = 1 (floors 1-3)
+
+            # First enemy already in room.enemies from Room constructor
+            for _ in range(count_enemies - 1):
+                room.enemies.append(Enemy(floor_num, ng_plus_cycle))
+
+            # Elite enemy spawning on floor 3+
+            if floor_num >= 3 and random.random() < 0.20:
+                elite = EliteEnemy(floor_num, ng_plus_cycle)
+                if room.enemies:
+                    elite._name = room.enemies[0]._name
+                room.enemies[0] = elite
+
+            # Undead/Forgotten Chamber flavour override
+            if theme_name == 'Forgotten Chamber' and random.random() < 0.30:
+                room.enemies[0]._name = _undead_name(floor_num)
 
         if rtype == 'empty':
             # Forgotten Chamber boosts item spawn chance to 40%

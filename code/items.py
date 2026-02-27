@@ -16,31 +16,41 @@ class HealthPotion:
 
 
 class Weapon:
-    def __init__(self, name, bonus):
-        self.name  = name
-        self.bonus = bonus
-        self.desc  = f'+{bonus} attack'
+    def __init__(self, name, bonus, dex_bonus: int = 0):
+        self.name      = name
+        self.bonus     = bonus
+        self.dex_bonus = dex_bonus
+        parts = [f'+{bonus} attack']
+        if dex_bonus > 0:
+            parts.append(f'+{dex_bonus} DEX')
+        self.desc = ', '.join(parts)
 
     def to_dict(self):
-        return {'type': 'weapon', 'name': self.name, 'bonus': self.bonus}
+        return {'type': 'weapon', 'name': self.name,
+                'bonus': self.bonus, 'dex_bonus': self.dex_bonus}
 
     @staticmethod
     def from_dict(d):
-        return Weapon(d['name'], d['bonus'])
+        return Weapon(d['name'], d['bonus'], d.get('dex_bonus', 0))
 
 
 class Armour:
-    def __init__(self, name, bonus):
-        self.name  = name
-        self.bonus = bonus
-        self.desc  = f'+{bonus} defense'
+    def __init__(self, name, bonus, dex_bonus: int = 0):
+        self.name      = name
+        self.bonus     = bonus
+        self.dex_bonus = dex_bonus
+        parts = [f'+{bonus} defense']
+        if dex_bonus > 0:
+            parts.append(f'+{dex_bonus} DEX')
+        self.desc = ', '.join(parts)
 
     def to_dict(self):
-        return {'type': 'armour', 'name': self.name, 'bonus': self.bonus}
+        return {'type': 'armour', 'name': self.name,
+                'bonus': self.bonus, 'dex_bonus': self.dex_bonus}
 
     @staticmethod
     def from_dict(d):
-        return Armour(d['name'], d['bonus'])
+        return Armour(d['name'], d['bonus'], d.get('dex_bonus', 0))
 
 
 class Scroll:
@@ -77,11 +87,13 @@ def random_item(floor_num=1):
     elif roll < 0.55:
         idx  = min(floor_num - 1, len(WEAPON_POOL) - 1)
         name, bonus = random.choice(WEAPON_POOL[:idx + 1])
-        return Weapon(name, bonus)
+        dex_bonus = random.randint(1, 3) if random.random() < 0.30 else 0
+        return Weapon(name, bonus, dex_bonus)
     elif roll < 0.75:
         idx  = min(floor_num - 1, len(ARMOUR_POOL) - 1)
         name, bonus = random.choice(ARMOUR_POOL[:idx + 1])
-        return Armour(name, bonus)
+        dex_bonus = random.randint(1, 2) if random.random() < 0.25 else 0
+        return Armour(name, bonus, dex_bonus)
     else:
         name, desc, effect = random.choice(SCROLL_POOL)
         return Scroll(name, desc, effect)

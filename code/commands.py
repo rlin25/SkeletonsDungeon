@@ -3,7 +3,7 @@ from typing import Optional
 import sys
 import random
 
-from constants import DIRECTIONS, ABBREVS, xp_threshold, REST_FLAVOUR
+from constants import DIRECTIONS, ABBREVS, OPPOSITES, xp_threshold, REST_FLAVOUR
 from items import HealthPotion, Scroll, Weapon, Armour
 from upgrades import draw_upgrades
 from renderer import say, hp_bar
@@ -167,19 +167,94 @@ def do_merchant(room, player, floor_num):
     print()
 
 
+# ── _apply_trap helper ────────────────────────────────────────────────────────
+
+def _apply_trap(room, player, floor_num, msgs):
+    """Fire the trap effect. Caller sets room.trap_triggered = True after."""
+    t = room.trap_type
+    if t == 'spike_pit':
+        damage = 15 + floor_num * 2
+        actual = player.take_damage(damage)
+        player.run_stats['damage_taken'] += actual
+        msgs.append(f"The spike pit deals {actual} damage!")
+    elif t == 'poison_vent':
+        player.apply_status('poisoned', 3)
+        msgs.append("Poison gas floods the room! You are Poisoned for 3 turns.")
+    elif t == 'alarm':
+        room.alarm_pending = True
+        msgs.append("The alarm sounds! You hear footsteps approaching nearby...")
+    elif t == 'binding_snare':
+        player.apply_status('stunned', 1)
+        msgs.append("The snare tightens! You will be stunned at the start of your next turn.")
+    elif t == 'collapse':
+        actual = player.take_damage(10)
+        player.run_stats['damage_taken'] += actual
+        msgs.append(f"The ceiling collapses! {actual} damage taken.")
+        if room.exits:
+            removed = random.choice(list(room.exits.keys()))
+            neighbor = room.exits.pop(removed)
+            opp = OPPOSITES[removed]
+            if opp in neighbor.exits and neighbor.exits[opp] is room:
+                del neighbor.exits[opp]
+            msgs.append(f"The {removed} exit is blocked by rubble!")
+
+
 # ── Individual command handlers ───────────────────────────────────────────────
 
 def cmd_attack(tokens, player, room, floor_num, boss_room):
-    enemy = room.enemy
-    if not enemy or not enemy.alive:
+    alive = [e for e in room.enemies if e.alive]
+    if not alive:
         return CommandResult(messages=['There is nothing to attack.'])
-    dmg = player.roll_attack()
-    enemy.take_damage(dmg)
-    msgs = [f"You strike the {enemy.name} for {dmg} damage!"]
-    if not enemy.alive:
-        msgs.append(f"The {enemy._name} crumples to the ground. Victory!")
+
+    # Select target
+    if len(alive) == 1:
+        target = alive[0]
     else:
-        msgs.append(f"The {enemy.name} staggers — {enemy.hp}/{enemy.max_hp} HP.")
+        if len(tokens) >= 2 and tokens[1].isdigit():
+            idx = int(tokens[1]) - 1
+            if 0 <= idx < len(alive):
+                target = alive[idx]
+            else:
+                return CommandResult(messages=[f"Invalid target. Choose 1\u2013{len(alive)}."])
+        else:
+            msgs = ["Multiple enemies \u2014 specify target:"]
+            for i, e in enumerate(alive, 1):
+                fx = ' '.join(f"[{k.capitalize()}:{v}]" for k, v in e.status_effects.items())
+                if getattr(e, 'enraged', False):
+                    fx += ' [ENRAGED]'
+                msgs.append(f"  {i}. {e.name} ({e.hp}/{e.max_hp} HP){' ' + fx if fx else ''}")
+            msgs.append("Usage: attack 1, attack 2, etc.")
+            return CommandResult(messages=msgs)
+
+    msgs = []
+    # Check shield (elites/final boss only)
+    from combat import check_elite_shield, check_final_boss_shield, check_elite_hp_abilities, check_final_boss_hp_abilities
+    if getattr(target, 'is_elite', False):
+        if check_elite_shield(target, msgs):
+            return CommandResult(turn_used=True, messages=msgs)
+    elif getattr(target, 'is_final_boss', False):
+        if check_final_boss_shield(target, msgs):
+            return CommandResult(turn_used=True, messages=msgs)
+
+    dmg = player.roll_attack()
+    target.take_damage(dmg)
+    player.run_stats['damage_dealt'] += dmg
+    msgs.append(f"You strike the {target.name} for {dmg} damage!")
+
+    # Check HP-triggered abilities (elite/final boss) after taking damage
+    if getattr(target, 'is_elite', False):
+        check_elite_hp_abilities(target, msgs)
+    elif getattr(target, 'is_final_boss', False):
+        check_final_boss_hp_abilities(target, msgs)
+
+    if not target.alive:
+        msgs.append(f"The {target._name} crumples to the ground. Victory!")
+    else:
+        fx = ' '.join(f"[{k.capitalize()}:{v}]" for k, v in target.status_effects.items())
+        if getattr(target, 'enraged', False):
+            fx += ' [ENRAGED]'
+        fx_str = f" {fx}" if fx else ''
+        msgs.append(f"The {target.name} staggers \u2014 {target.hp}/{target.max_hp} HP.{fx_str}")
     return CommandResult(turn_used=True, messages=msgs)
 
 
@@ -188,17 +263,66 @@ def cmd_heavy_strike(tokens, player, room, floor_num, boss_room):
         return CommandResult(messages=['Heavy Strike is not unlocked. Level up to learn it.'])
     if player.hs_cooldown > 0:
         return CommandResult(messages=[f"Heavy Strike is on cooldown ({player.hs_cooldown} turn(s) remaining)."])
-    enemy = room.enemy
-    if not enemy or not enemy.alive:
+
+    alive = [e for e in room.enemies if e.alive]
+    if not alive:
         return CommandResult(messages=['There is nothing to attack.'])
-    dmg = player.roll_heavy()
-    enemy.take_damage(dmg)
-    player.hs_cooldown = player.hs_max_cd
-    msgs = [f"HEAVY STRIKE! You slam the {enemy.name} for {dmg} damage!"]
-    if not enemy.alive:
-        msgs.append(f"The {enemy._name} is obliterated. Victory!")
+
+    # Select target — note: after normalize, 'hs 2' becomes tokens=['heavy','strike','2']
+    # so the target number is at tokens[2] (index 2), not tokens[1]
+    if len(alive) == 1:
+        target = alive[0]
     else:
-        msgs.append(f"The {enemy.name} reels — {enemy.hp}/{enemy.max_hp} HP.")
+        # Check tokens[2] for target number (tokens[1] == 'strike' after expansion)
+        target_token = tokens[2] if len(tokens) >= 3 else None
+        if target_token and target_token.isdigit():
+            idx = int(target_token) - 1
+            if 0 <= idx < len(alive):
+                target = alive[idx]
+            else:
+                return CommandResult(messages=[f"Invalid target. Choose 1\u2013{len(alive)}."])
+        else:
+            msgs = ["Multiple enemies \u2014 specify target:"]
+            for i, e in enumerate(alive, 1):
+                fx = ' '.join(f"[{k.capitalize()}:{v}]" for k, v in e.status_effects.items())
+                if getattr(e, 'enraged', False):
+                    fx += ' [ENRAGED]'
+                msgs.append(f"  {i}. {e.name} ({e.hp}/{e.max_hp} HP){' ' + fx if fx else ''}")
+            msgs.append("Usage: heavy strike 1, heavy strike 2, etc.  (or: hs 1, hs 2)")
+            return CommandResult(messages=msgs)
+
+    msgs = []
+    # Check shield (elites/final boss only)
+    from combat import check_elite_shield, check_final_boss_shield, check_elite_hp_abilities, check_final_boss_hp_abilities
+    if getattr(target, 'is_elite', False):
+        if check_elite_shield(target, msgs):
+            player.hs_cooldown = player.hs_max_cd
+            return CommandResult(turn_used=True, messages=msgs)
+    elif getattr(target, 'is_final_boss', False):
+        if check_final_boss_shield(target, msgs):
+            player.hs_cooldown = player.hs_max_cd
+            return CommandResult(turn_used=True, messages=msgs)
+
+    dmg = player.roll_heavy()
+    target.take_damage(dmg)
+    player.run_stats['damage_dealt'] += dmg
+    player.hs_cooldown = player.hs_max_cd
+    msgs.append(f"HEAVY STRIKE! You slam the {target.name} for {dmg} damage!")
+
+    # Check HP-triggered abilities (elite/final boss) after taking damage
+    if getattr(target, 'is_elite', False):
+        check_elite_hp_abilities(target, msgs)
+    elif getattr(target, 'is_final_boss', False):
+        check_final_boss_hp_abilities(target, msgs)
+
+    if not target.alive:
+        msgs.append(f"The {target._name} is obliterated. Victory!")
+    else:
+        fx = ' '.join(f"[{k.capitalize()}:{v}]" for k, v in target.status_effects.items())
+        if getattr(target, 'enraged', False):
+            fx += ' [ENRAGED]'
+        fx_str = f" {fx}" if fx else ''
+        msgs.append(f"The {target.name} reels \u2014 {target.hp}/{target.max_hp} HP.{fx_str}")
     return CommandResult(turn_used=True, messages=msgs)
 
 
@@ -208,14 +332,20 @@ def cmd_move(tokens, player, room, floor_num, boss_room):
     direction = tokens[1]
     if direction not in room.exits:
         return CommandResult(messages=[f"There is no door to the {direction}."])
-    if room.enemy and room.enemy.alive:
-        return CommandResult(messages=[f"You can't leave — {room.enemy.name} blocks the way!"])
+    alive = [e for e in room.enemies if e.alive]
+    if alive:
+        return CommandResult(messages=[f"You can't leave \u2014 {alive[0].name} blocks the way!"])
     return CommandResult(messages=[f"You move {direction}."], new_room=room.exits[direction])
 
 
 def cmd_look(tokens, player, room, floor_num, boss_room):
     room.exits_revealed = True  # reveal exits in Collapsed Tunnel
-    if room.type == 'boss':
+    if room.type == 'final_boss':
+        msgs = [
+            "The air crackles with ancient power. Runes glow malevolently across the walls.",
+            "This is the lair of The Dungeon Architect \u2014 the force that shaped this nightmare.",
+        ]
+    elif room.type == 'boss':
         msgs = ["The chamber reeks of blood. Shadows writhe on the walls."]
     else:
         msgs = [f"{room.theme_name}: {room.theme_desc}"]
@@ -227,11 +357,19 @@ def cmd_look(tokens, player, room, floor_num, boss_room):
         elif room.theme_name == 'Forgotten Chamber':
             msgs.append("[Forgotten Chamber: undead variant enemies, higher item chance]")
         elif room.theme_name == 'Collapsed Tunnel':
-            msgs.append("[Collapsed Tunnel: exits were hidden — now revealed]")
+            msgs.append("[Collapsed Tunnel: exits were hidden \u2014 now revealed]")
         if room.type == 'staircase':
             msgs.append("A stone staircase descends into the darkness below.")
-            if boss_room and boss_room.enemy and boss_room.enemy.alive:
-                msgs.append("The staircase is sealed — defeat the boss first.")
+            if boss_room and any(e.alive for e in boss_room.enemies):
+                msgs.append("The staircase is sealed \u2014 defeat the boss first.")
+        elif room.type == 'trap':
+            if room.trap_disarmed:
+                msgs.append(f"A disarmed {room.trap_type.replace('_', ' ')} trap sits harmlessly here.")
+            elif room.trap_triggered:
+                msgs.append(f"A spent {room.trap_type.replace('_', ' ')} trap is here — the danger has passed.")
+            else:
+                msgs.append(f"You sense danger here. There is a {room.trap_type.replace('_', ' ')} trap!")
+                msgs.append("Type 'disarm' to attempt disarming it, or 'proceed' to push through.")
         elif room.type == 'rest':
             if room.rest_used:
                 msgs.append("The rest spot here is depleted.")
@@ -247,8 +385,18 @@ def cmd_look(tokens, player, room, floor_num, boss_room):
                 msgs.append("The merchant has nothing left to sell.")
         elif room.flavour:
             msgs.append(room.flavour)
-    if room.enemy and room.enemy.alive:
-        msgs.append(f"{room.enemy.name} ({room.enemy.hp}/{room.enemy.max_hp} HP) faces you.")
+
+    # Display all alive enemies
+    alive_enemies = [e for e in room.enemies if e.alive]
+    for e in alive_enemies:
+        fx = ' '.join(f"[{k.capitalize()}:{v}]" for k, v in e.status_effects.items())
+        if getattr(e, 'enraged', False):
+            fx += ' [ENRAGED]'
+        elite_tag = ' [ELITE]' if getattr(e, 'is_elite', False) else ''
+        boss_tag = ' [FINAL BOSS]' if getattr(e, 'is_final_boss', False) else ''
+        fx_str = f"  {fx}" if fx else ''
+        msgs.append(f"{e.name}{elite_tag}{boss_tag} ({e.hp}/{e.max_hp} HP){fx_str} faces you.")
+
     if room.item:
         msgs.append(f"There is a {room.item.name} on the ground.")
     exits = ', '.join(d for d in DIRECTIONS if d in room.exits) or 'none'
@@ -296,7 +444,12 @@ def cmd_use(tokens, player, room, floor_num, boss_room):
     if item is None:
         return CommandResult(messages=[f"No item matching '{target}'. Check 'inventory'."])
     msgs = []
-    enemy = room.enemy
+    # Get first alive enemy for scroll effects that target enemies
+    enemy = None
+    for e in room.enemies:
+        if e.alive:
+            enemy = e
+            break
     if isinstance(item, HealthPotion):
         before = player.hp
         player.heal(40)
@@ -313,6 +466,17 @@ def cmd_use(tokens, player, room, floor_num, boss_room):
         elif item.effect == 'double_dmg':
             player.double_dmg = 3
             msgs.append("The Fury Scroll ignites your veins — double damage for 3 turns!")
+        elif item.effect == 'poison_enemy':
+            if not enemy or not enemy.alive:
+                return CommandResult(messages=['There is no enemy to poison.'])  # item NOT consumed
+            enemy.status_effects['poisoned'] = 3
+            msgs.append(f"The Poison Scroll dissolves! {enemy.name} is Poisoned for 3 turns.")
+        elif item.effect == 'burn_enemy':
+            if not enemy or not enemy.alive:
+                return CommandResult(messages=['There is no enemy to burn.'])  # item NOT consumed
+            enemy.status_effects['burned'] = 3
+            msgs.append(f"The Burn Scroll ignites! {enemy.name} is Burned for 3 turns.")
+    player.run_stats['items_used'] += 1
     player.consumables.pop(idx)
     return CommandResult(messages=msgs)
 
@@ -331,9 +495,10 @@ def cmd_equip(tokens, player, room, floor_num, boss_room):
 def cmd_descend(tokens, player, room, floor_num, boss_room):
     if room.type != 'staircase':
         return CommandResult(messages=['There is no staircase here.'])
-    if room.enemy and room.enemy.alive:
-        return CommandResult(messages=[f"You can't descend — {room.enemy.name} blocks the staircase!"])
-    if boss_room and boss_room.enemy and boss_room.enemy.alive:
+    alive = [e for e in room.enemies if e.alive]
+    if alive:
+        return CommandResult(messages=[f"You can't descend \u2014 {alive[0].name} blocks the staircase!"])
+    if boss_room and any(e.alive for e in boss_room.enemies):
         return CommandResult(messages=['The staircase is sealed. Defeat the boss first!'])
     return CommandResult(messages=['You descend the staircase into deeper darkness...'], descended=True)
 
@@ -343,8 +508,10 @@ def cmd_map(tokens, player, room, floor_num, boss_room):
 
 
 def cmd_save(tokens, player, room, floor_num, boss_room):
+    if room.type == 'trap':
+        return CommandResult(messages=['Trap rooms are not valid save locations.'])
     can = (room.type in ('empty', 'rest') or
-           (room.type == 'boss' and room.enemy and not room.enemy.alive))
+           (room.type in ('boss', 'final_boss') and not any(e.alive for e in room.enemies)))
     if not can:
         return CommandResult(messages=['You can only save in empty rooms, rest rooms, or after defeating a boss.'])
     return CommandResult(action='save')
@@ -357,12 +524,14 @@ def cmd_load(tokens, player, room, floor_num, boss_room):
 def cmd_rest(tokens, player, room, floor_num, boss_room):
     if room.type != 'rest':
         return CommandResult(messages=["There is no place to rest here."])
-    if room.enemy and room.enemy.alive:
-        return CommandResult(messages=[f"You can't rest with {room.enemy.name} threatening you!"])
+    alive = [e for e in room.enemies if e.alive]
+    if alive:
+        return CommandResult(messages=[f"You can't rest with {alive[0].name} threatening you!"])
     if room.rest_used:
         return CommandResult(messages=["This rest spot is depleted. There is nothing more to gain here."])
     room.rest_used = True
     player.full_heal()
+    player.run_stats['times_rested'] += 1
     flavour = REST_FLAVOUR.get(room.theme_name, "You rest and recover fully.")
     return CommandResult(messages=[flavour, f"HP fully restored! ({player.hp}/{player.max_hp})"])
 
@@ -420,11 +589,48 @@ def cmd_reroll(tokens, player, room, floor_num, boss_room):
     return CommandResult(messages=msgs)
 
 
+def cmd_disarm(tokens, player, room, floor_num, boss_room):
+    if room.type != 'trap':
+        return CommandResult(messages=["There is no trap to disarm here."])
+    if room.trap_triggered or room.trap_disarmed:
+        return CommandResult(messages=["The trap has already been resolved."])
+    chance = player.disarm_chance()
+    success = random.random() * 100 < chance
+    if success:
+        room.trap_disarmed = True
+        player.run_stats['traps_disarmed'] += 1
+        trap_name = room.trap_type.replace('_', ' ').title()
+        return CommandResult(messages=[
+            f"Disarm chance: {chance:.0f}% \u2014 Success! The {trap_name} is neutralised.",
+            "The room is now safe."
+        ])
+    else:
+        msgs = [f"Disarm chance: {chance:.0f}% \u2014 Failed! The trap triggers!"]
+        _apply_trap(room, player, floor_num, msgs)
+        room.trap_triggered = True
+        player.run_stats['traps_triggered'] += 1
+        return CommandResult(turn_used=True, messages=msgs)
+
+
+def cmd_proceed(tokens, player, room, floor_num, boss_room):
+    if room.type != 'trap':
+        return CommandResult(messages=["There is no trap here to proceed through."])
+    if room.trap_triggered or room.trap_disarmed:
+        return CommandResult(messages=["The trap has already been resolved."])
+    msgs = ["You push forward through the trap..."]
+    _apply_trap(room, player, floor_num, msgs)
+    room.trap_triggered = True
+    player.run_stats['traps_triggered'] += 1
+    return CommandResult(turn_used=True, messages=msgs)
+
+
 def cmd_help(tokens, player, room, floor_num, boss_room):
-    say("Commands: attack (a) | heavy strike (hs) | move <dir> (mn/ms/me/mw)")
+    say("Commands: attack (a) [n] | heavy strike (hs) [n] | move <dir> (mn/ms/me/mw)")
     say("          look (l) | health (h) | inventory (i) | use <item> (u)")
     say("          equip | descend (d) | map (m) | save (sv) | load (ld) | quit")
     say("          rest (r) | buy [n] (b [n]) | reroll (rr)")
+    say("          disarm (da) | proceed (pr)")
+    say("  [n] = optional enemy number when multiple enemies are present")
     return CommandResult()
 
 
@@ -451,6 +657,8 @@ COMMAND_HANDLERS = {
     'rest':      cmd_rest,
     'buy':       cmd_buy,
     'reroll':    cmd_reroll,
+    'disarm':    cmd_disarm,
+    'proceed':   cmd_proceed,
     'help':      cmd_help,
     '?':         cmd_help,
     'quit':      cmd_quit,

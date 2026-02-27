@@ -39,6 +39,16 @@ class _DefUpgrade(_Upgrade):
         player.defense += self.amount
 
 
+class _DexUpgrade(_Upgrade):
+    def __init__(self, amount):
+        super().__init__('dex', f'+{amount} Dexterity',
+                         f'Dexterity increases by {amount}. Improves dodge and trap disarm.')
+        self.amount = amount
+
+    def apply(self, player):
+        player.dex += self.amount
+
+
 class _HSUpgrade(_Upgrade):
     def __init__(self, is_unlock):
         if is_unlock:
@@ -62,6 +72,7 @@ def draw_upgrades(player, count=3):
         'hp':  [_HPUpgrade(20), _HPUpgrade(30)],
         'atk': [_AtkUpgrade(5), _AtkUpgrade(8)],
         'def': [_DefUpgrade(2), _DefUpgrade(3)],
+        'dex': [_DexUpgrade(2), _DexUpgrade(3)],
     }
     if not player.hs_unlocked:
         cats['hs'] = [_HSUpgrade(True)]

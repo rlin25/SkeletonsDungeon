@@ -1,4 +1,5 @@
 import sys
+import time
 
 from constants import RULE, DIRECTIONS, ROOM_W, ROOM_H, xp_threshold
 from enemy import Boss
@@ -19,8 +20,11 @@ def hp_bar(current, maximum, width=20):
 
 def status_line(player, floor_num):
     thresh = xp_threshold(player.level)
+    floor_str = f"Floor {floor_num}"
+    if player.ng_plus_cycle >= 1:
+        floor_str = f"Floor {floor_num} [NG+{player.ng_plus_cycle}]"
     parts  = [
-        f"Floor {floor_num}",
+        floor_str,
         f"Lv {player.level}",
         f"HP: {player.hp}/{player.max_hp}",
         f"XP: {player.xp}/{thresh}",
@@ -33,10 +37,14 @@ def status_line(player, floor_num):
     if player.atk_bonus > 0:
         star = '*' if player.temp_atk > 0 else ''
         parts.append(f"ATK: +{player.atk_bonus}{star}")
+    dex_pct = int(player.dex / (player.dex + 40) * 100)
+    parts.append(f"DEX: {player.dex} ({dex_pct}%)")
     if player.hs_unlocked:
         parts.append(f"HS: {'ready' if player.hs_cooldown == 0 else str(player.hs_cooldown) + 't'}")
     if player.double_dmg > 0:
         parts.append(f"FURY: {player.double_dmg}t")
+    for effect, turns in player.status_effects.items():
+        parts.append(f"[{effect.capitalize()}: {turns}]")
     return " | ".join(parts)
 
 
@@ -45,6 +53,12 @@ def status_line(player, floor_num):
 def _room_sym(r, current_room):
     if r is current_room:
         return '[*]'
+    if r.type == 'trap':
+        if r.trap_disarmed:
+            return '[t]'
+        return '[T]'
+    if r.type == 'final_boss':
+        return '[F]' if (r.enemy and r.enemy.alive) else '[ ]'
     if r.type == 'staircase':
         return '[S]'
     if r.type == 'boss':
@@ -98,8 +112,12 @@ def draw_room(player, room, floor_num, rooms=None):
     W, H  = ROOM_W, ROOM_H
     grid  = [[' '] * W for _ in range(H)]
     grid[H // 2][W // 2] = 'P'
-    if room.enemy and room.enemy.alive:
+
+    alive_enemies = [e for e in room.enemies if e.alive]
+    if alive_enemies:
         grid[H // 4][W // 4] = 'E'
+        if len(alive_enemies) > 1:
+            grid[H // 4][W // 4 + 2] = str(len(alive_enemies))
 
     inner = W + 2
     mid   = inner // 2
@@ -124,13 +142,19 @@ def draw_room(player, room, floor_num, rooms=None):
     TYPE_LABELS = {
         'enemy': 'Enemy Room', 'empty': 'Empty Room', 'staircase': 'Staircase',
         'boss': 'Boss Chamber', 'merchant': 'Merchant Room', 'rest': 'Rest Room',
+        'trap': 'Trap Room', 'final_boss': 'Final Boss Chamber',
     }
     info_lines = []
 
-    if room.enemy and room.enemy.alive:
-        e_bar = hp_bar(room.enemy.hp, room.enemy.max_hp)
-        info_lines.append(f"[E] {room.enemy.name:<24} HP: [{e_bar}] {room.enemy.hp}/{room.enemy.max_hp}")
-        if isinstance(room.enemy, Boss) and room.enemy.telegraphing:
+    for i, e in enumerate(alive_enemies, 1):
+        e_bar = hp_bar(e.hp, e.max_hp)
+        fx = ' '.join(f"[{k.capitalize()}:{v}]" for k, v in e.status_effects.items() if k != 'stunned' or v > 0)
+        if getattr(e, 'enraged', False):
+            fx += ' [ENRAGED]'
+        fx_str = f" {fx}" if fx else ''
+        prefix = f"[{i}] " if len(alive_enemies) > 1 else "[E] "
+        info_lines.append(f"{prefix}{e.name:<24} HP: [{e_bar}] {e.hp}/{e.max_hp}{fx_str}")
+        if hasattr(e, 'telegraphing') and e.telegraphing:
             info_lines.append("*** WINDING UP FOR A DEVASTATING BLOW — BRACE YOURSELF! ***")
 
     # Room label with active theme modifiers
@@ -215,13 +239,18 @@ def draw_map(rooms, current_room, player, floor_num):
             print('  ' + conn_line.rstrip())
 
     print()
-    say("Legend: [*]=You  [ ]=Visited  [S]=Staircase  [E]=Enemy  [B]=Boss  [M]=Merchant  [R]=Rest  [r]=Rest(used)")
+    say("Legend: [*]=You  [ ]=Visited  [S]=Staircase  [E]=Enemy  [B]=Boss  [M]=Merchant  [R]=Rest  [r]=Rest(used)  [T]=Trap  [t]=Trap(disarmed)  [F]=FinalBoss")
     print()
 
 
 # ── announce_room ─────────────────────────────────────────────────────────────
 
 def announce_room(room, boss_room=None):
+    if room.type == 'final_boss':
+        say("The dungeon shudders. The torches extinguish themselves.")
+        say("A vast darkness gathers at the chamber's end.")
+        say("*** THE DUNGEON ARCHITECT AWAITS ***")
+        return
     if room.type == 'boss':
         say("The air turns cold. The walls tremble with dread.")
         say(f"*** {room.enemy._name} awaits! ***")
@@ -229,6 +258,16 @@ def announce_room(room, boss_room=None):
         say("A faint lantern flickers. A hunched merchant sits in the corner.")
     else:
         say(f"{room.theme_name}: {room.theme_desc}")
+        if room.type == 'trap' and not room.trap_triggered and not room.trap_disarmed:
+            trap_descs = {
+                'spike_pit':     'A grid of sharpened spikes is visible across the floor ahead.',
+                'poison_vent':   'Noxious green vapour seeps from cracks in the ceiling.',
+                'alarm':         'A taut wire glints at ankle height, connected to a bone-chime alarm.',
+                'binding_snare': 'Silken threads shimmer across the floor — a snare.',
+                'collapse':      'The ceiling here looks dangerously unstable. Rubble waits to fall.',
+            }
+            say(f"TRAP: {trap_descs.get(room.trap_type, 'A trap is here.')}")
+            say("Type 'disarm' (da) to attempt to disable it, or 'proceed' (pr) to push through.")
         if room.type == 'staircase':
             locked = boss_room and boss_room.enemy and boss_room.enemy.alive
             if locked:
@@ -244,8 +283,20 @@ def announce_room(room, boss_room=None):
             say(room.flavour)
         if room.item:
             say(f"There is a {room.item.name} on the ground.")
-    if room.enemy and room.enemy.alive and room.type != 'boss':
-        say(f"A {room.enemy.name} snarls at you!")
+
+    alive = [e for e in room.enemies if e.alive]
+    if room.type not in ('boss', 'final_boss', 'trap') and alive:
+        if len(alive) == 1:
+            if getattr(alive[0], 'is_elite', False):
+                say(f"A {alive[0].name} stands here — scarred and battle-hardened, with a dangerous look in its eyes.")
+            else:
+                say(f"A {alive[0].name} snarls at you!")
+        else:
+            for e in alive:
+                if getattr(e, 'is_elite', False):
+                    say(f"A {e.name} stands here — battle-hardened and dangerous.")
+                else:
+                    say(f"A {e.name} snarls at you!")
 
 
 # ── screens ───────────────────────────────────────────────────────────────────
@@ -263,6 +314,7 @@ def intro_screen():
     say("          look (l) | health (h) | inventory (i) | use <item> (u)")
     say("          descend (d) | map (m) | save (sv) | load (ld) | quit")
     say("          rest (r) | buy [n] (b [n]) | reroll (rr)")
+    say("          disarm (da) | proceed (pr)")
     print()
 
 
@@ -284,3 +336,43 @@ def ask_restart():
         if ans in ('yes', 'y'): return True
         if ans in ('no', 'n'):  return False
         say("Please type yes or no.")
+
+
+def win_screen(player, run_stats, floor_num):
+    print()
+    print("  ╔══════════════════════════════════════════════╗")
+    print("  ║           V I C T O R Y                     ║")
+    print("  ╚══════════════════════════════════════════════╝")
+    print()
+    say("The Dungeon Architect crumbles to dust.")
+    say("Silence falls. For the first time in an age, the dungeon is still.")
+    say("You ascend — battered, changed, alive.")
+    print()
+    say("━━━  RUN SUMMARY  ━━━")
+    elapsed = time.time() - run_stats.get('start_time', time.time())
+    m, s = divmod(int(elapsed), 60)
+    h, m = divmod(m, 60)
+    time_str = f"{h}h {m}m {s}s" if h else f"{m}m {s}s"
+    ng_str = f" (NG+{player.ng_plus_cycle})" if player.ng_plus_cycle else ""
+    say(f"Run{ng_str}: Floor {floor_num} | Level {player.level}")
+    print()
+    stats = [
+        ("Floors cleared",    run_stats.get('floors_cleared', 0)),
+        ("Enemies killed",    run_stats.get('enemies_killed', 0)),
+        ("  — Elites",        run_stats.get('elites_killed', 0)),
+        ("Bosses defeated",   run_stats.get('bosses_defeated', 0)),
+        ("Total gold earned", run_stats.get('total_gold_earned', 0)),
+        ("Damage dealt",      run_stats.get('damage_dealt', 0)),
+        ("Damage taken",      run_stats.get('damage_taken', 0)),
+        ("Times rested",      run_stats.get('times_rested', 0)),
+        ("Items used",        run_stats.get('items_used', 0)),
+        ("Traps disarmed",    run_stats.get('traps_disarmed', 0)),
+        ("Traps triggered",   run_stats.get('traps_triggered', 0)),
+        ("Turns taken",       run_stats.get('turns_taken', 0)),
+        ("Time elapsed",      time_str),
+    ]
+    for label, val in stats:
+        say(f"  {label:<22} {val}")
+    print()
+    say("Type 'ng+' to begin New Game+, or 'quit' to exit.")
+    print()

@@ -8,6 +8,8 @@ OPPOSITES     = {'north': 'south', 'south': 'north', 'east': 'west', 'west': 'ea
 DIR_DELTA     = {'north': (0, -1), 'south': (0, 1), 'east': (1, 0), 'west': (-1, 0)}
 SAVE_FILE     = 'dungeon_save.json'
 
+FINAL_BOSS_FLOOR = 15
+
 ENEMY_TIERS = [
     (5, ['Troll', 'Undead Knight', 'Dungeon Horror']),
     (3, ['Orc', 'Shadow Wraith', 'Stone Golem']),
@@ -18,6 +20,13 @@ BOSS_NAMES = [
     'The Bone Warden', 'Vexoth the Unmade', 'Skarreth the Deep',
     'Nulgrath, Void-touched', 'Xaedron the Ancient',
 ]
+
+ELITE_PREFIXES = [
+    'Veteran', 'Cursed', 'Frenzied', 'Ancient', 'Rotting',
+    'Withered', 'Scarred', 'Hollow', 'Savage', 'Forsaken',
+]
+
+ELITE_ABILITIES = ['heal', 'enrage', 'summon', 'shield', 'poison_strike', 'stun_strike']
 
 THEMES = [
     ('Damp Cave',         'Water drips from the ceiling. Moss coats the stone walls.'),
@@ -50,6 +59,8 @@ SCROLL_POOL = [
     ('Stun Scroll',    'Stuns the enemy for 1 turn.',      'stun'),
     ('Healing Scroll', 'Restores you to full HP.',          'full_heal'),
     ('Fury Scroll',    'Doubles your damage for 3 turns.',  'double_dmg'),
+    ('Poison Scroll',  'Poisons the enemy for 3 turns.',   'poison_enemy'),
+    ('Burn Scroll',    'Burns the enemy for 3 turns.',      'burn_enemy'),
 ]
 
 # Single-token command abbreviations
@@ -68,6 +79,8 @@ ABBREVS = {
     'r':  'rest',
     'b':  'buy',
     'rr': 'reroll',
+    'da': 'disarm',
+    'pr': 'proceed',
 }
 
 RULE = '─' * 44
